@@ -54,8 +54,8 @@ def get_customer(identifier: str):
     if result.empty:
         return {"found": False, "message": f"No customer found for: {identifier}"}
 
-    record = result.iloc[0].to_dict()
-    return {"found": True, "data": record}
+record = result.iloc[0].fillna("").to_dict()
+return {"found": True, "data": record}
 
 
 @app.get("/customers")
@@ -65,7 +65,7 @@ def list_customers(limit: int = 10):
     return {
         "total": len(df),
         "columns": list(df.columns),
-        "sample": df.head(limit).to_dict(orient="records")
+        "sample": df.head(limit).fillna("").to_dict(orient="records")
     }
 
 
