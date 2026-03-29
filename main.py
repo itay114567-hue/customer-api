@@ -2,26 +2,26 @@ from fastapi import FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 import requests
 import os
-
+ 
 app = FastAPI(title="Customer Data API - Fireberry", version="2.0.0")
-
+ 
 app.add_middleware(
     CORSMiddleware,
     allow_origins=["*"],
     allow_methods=["*"],
     allow_headers=["*"],
 )
-
+ 
 # ─── Fireberry config ────────────────────────────────────────
 FIREBERRY_TOKEN = os.getenv("FIREBERRY_TOKEN")
 FIREBERRY_BASE  = "https://api.fireberry.com/api"
-
+ 
 def fb_headers():
     return {
         "tokenid": FIREBERRY_TOKEN,
         "Content-Type": "application/json",
     }
-
+ 
 def fb_get(path: str, params: dict = {}):
     """Generic GET to Fireberry API"""
     url = f"{FIREBERRY_BASE}/{path}"
@@ -32,22 +32,23 @@ def fb_get(path: str, params: dict = {}):
     if not data.get("success"):
         raise HTTPException(status_code=502, detail=f"Fireberry error: {data.get('message')}")
     return data
-
+ 
 def fb_post(path: str, body: dict):
+    """Generic POST to Fireberry API"""
     url = f"{FIREBERRY_BASE}/{path}"
     res = requests.post(url, headers=fb_headers(), json=body, timeout=10)
     data = res.json()
-    print(f"FB POST {path} → status={res.status_code} body={data}")  # ← הוסיפי שורה זו
+    print(f"FB POST {path} → status={res.status_code} body={data}")
     if not data.get("success"):
         raise HTTPException(status_code=502, detail=f"Fireberry error: {data.get('message')} | full: {data}")
     return data
-
+ 
 def normalize_phone(phone: str) -> str:
     """054-1234567 → 0541234567 (Fireberry stores without dashes)"""
     return phone.replace("-", "").replace(" ", "").strip()
-
+ 
 def map_customer(raw: dict) -> dict:
-    """Fireberry account → unified customer format (same structure agents expect)"""
+    """Fireberry account → unified customer format"""
     return {
         "found": True,
         "source": "fireberry",
@@ -63,7 +64,7 @@ def map_customer(raw: dict) -> dict:
             "notes":          raw.get("description") or raw.get("needs") or "",
         }
     }
-
+ 
 def map_order(raw: dict) -> dict:
     """Fireberry opportunity → unified order format"""
     return {
@@ -80,13 +81,13 @@ def map_order(raw: dict) -> dict:
             "notes":             raw.get("description") or "",
         }
     }
-
+ 
 # ─── Health ──────────────────────────────────────────────────
-
+ 
 @app.get("/")
 def root():
     return {"message": "Customer Data API v2 - Fireberry", "version": "2.0.0"}
-
+ 
 @app.get("/health")
 def health():
     if not FIREBERRY_TOKEN:
@@ -96,22 +97,17 @@ def health():
         return {"status": "ok", "crm": "fireberry"}
     except Exception as e:
         return {"status": "error", "detail": str(e)}
-
-# ─── Main endpoint — same URL the agents already call ────────
-# /customer/{identifier}  ← agents don't change anything
-
+ 
+# ─── Customer lookup ─────────────────────────────────────────
+ 
 @app.get("/customer/{identifier}")
 def get_customer(identifier: str):
-    """
-    Search by: order number, phone, or email.
-    Returns same JSON structure as before — agents don't notice the change.
-    """
     if not FIREBERRY_TOKEN:
         raise HTTPException(status_code=500, detail="FIREBERRY_TOKEN not configured")
-
+ 
     identifier = identifier.strip()
-
-    # 1. Try as phone number → search account first (most common case)
+ 
+    # 1. Try as phone number
     normalized = normalize_phone(identifier)
     if normalized.startswith("0") or normalized.startswith("+972"):
         try:
@@ -125,7 +121,7 @@ def get_customer(identifier: str):
                 return map_customer(records[0])
         except Exception:
             pass
-
+ 
     # 2. Try as order number (opportunity)
     if identifier.upper().startswith("ORD-") or identifier.isdigit():
         try:
@@ -139,7 +135,7 @@ def get_customer(identifier: str):
                 return map_order(records[0])
         except Exception:
             pass
-
+ 
     # 3. Try as email
     if "@" in identifier:
         try:
@@ -153,14 +149,12 @@ def get_customer(identifier: str):
                 return map_customer(records[0])
         except Exception:
             pass
-
-    # 4. Not found
+ 
     return {"found": False, "message": f"No record found for: {identifier}"}
-
-
-# ─── Escalate via GET — for ScrapeWebsiteTool (no POST needed) ──
-# Usage: /escalate?customer_id=XXX&intent=Refund+Request&description=raw+message&channel=whatsapp
-
+ 
+ 
+# ─── Escalate via GET ─────────────────────────────────────────
+ 
 @app.get("/escalate")
 def escalate(
     customer_id: str = "",
@@ -169,19 +163,14 @@ def escalate(
     channel: str = "whatsapp",
     priority: str = "high"
 ):
-    """
-    GET endpoint so ScrapeWebsiteTool can trigger ticket creation.
-    Decision Maker calls:
-    /escalate?customer_id={id}&intent={intent}&description={message}&channel=whatsapp
-    """
     if not FIREBERRY_TOKEN:
         return {"success": False, "error": "FIREBERRY_TOKEN not configured"}
-
+ 
     if not customer_id:
         return {"success": False, "error": "customer_id is required"}
-
+ 
     priority_map = {"low": 1, "medium": 2, "high": 3, "urgent": 4}
-
+ 
     try:
         payload = {
             "title":        f"Escalation - {intent}" if intent else "Customer escalation",
@@ -190,17 +179,21 @@ def escalate(
             "prioritycode": priority_map.get(priority, 3),
             "statuscode":   1,
         }
-        result = fb_post("record/case", payload)
-        ticket_id = result.get("data", {}).get("caseid", "")
-
+        # ✅ תוקן: Cases במקום case
+        result = fb_post("record/Cases", payload)
+        ticket_id = result.get("data", {}).get("casesid", "") or result.get("data", {}).get("caseid", "")
+ 
         if ticket_id and channel:
-            fb_post("record/note", {
-                "regardingobjectid":       ticket_id,
-                "regardingobjecttypecode": "case",
-                "notetext": f"Channel: {channel}\nIntent: {intent}\nMessage: {description}",
-                "subject":  "Agent escalation",
-            })
-
+            try:
+                fb_post("record/note", {
+                    "regardingobjectid":       ticket_id,
+                    "regardingobjecttypecode": "Cases",
+                    "notetext": f"Channel: {channel}\nIntent: {intent}\nMessage: {description}",
+                    "subject":  "Agent escalation",
+                })
+            except Exception:
+                pass  # Note failure shouldn't fail the whole escalation
+ 
         return {
             "success": True,
             "ticket_id": ticket_id,
@@ -208,44 +201,45 @@ def escalate(
         }
     except Exception as e:
         return {"success": False, "error": str(e)}
-
-# ─── Ticket creation — new endpoint for Decision Maker ───────
-
+ 
+ 
+# ─── Ticket creation via POST ─────────────────────────────────
+ 
 @app.post("/ticket")
 def create_ticket(body: dict):
-    """
-    Called by Decision Maker when action_type = Escalate or needs a ticket.
-    Body: { customer_id, subject, description, priority, channel, intent }
-    """
     if not FIREBERRY_TOKEN:
         raise HTTPException(status_code=500, detail="FIREBERRY_TOKEN not configured")
-
+ 
     priority_map = {"low": 1, "medium": 2, "high": 3, "urgent": 4}
-
+ 
     payload = {
         "title":        body.get("subject", "Customer inquiry"),
         "description":  body.get("description", ""),
         "accountid":    body.get("customer_id", ""),
         "prioritycode": priority_map.get(body.get("priority", "medium"), 2),
-        "statuscode":   1,  # open
+        "statuscode":   1,
     }
-
-    result = fb_post("record/case", payload)
-    ticket_id = result.get("data", {}).get("caseid", "")
-
-    # Add note with channel + intent context
+ 
+    # ✅ תוקן: Cases במקום case
+    result = fb_post("record/Cases", payload)
+    ticket_id = result.get("data", {}).get("casesid", "") or result.get("data", {}).get("caseid", "")
+ 
     if ticket_id:
-        fb_post("record/note", {
-            "regardingobjectid":       ticket_id,
-            "regardingobjecttypecode": "case",
-            "notetext": f"Channel: {body.get('channel', 'unknown')}\nIntent: {body.get('intent', 'unknown')}",
-            "subject":  "Agent context",
-        })
-
+        try:
+            fb_post("record/note", {
+                "regardingobjectid":       ticket_id,
+                "regardingobjecttypecode": "Cases",
+                "notetext": f"Channel: {body.get('channel', 'unknown')}\nIntent: {body.get('intent', 'unknown')}",
+                "subject":  "Agent context",
+            })
+        except Exception:
+            pass
+ 
     return {"success": True, "ticket_id": ticket_id}
-
-# ─── Optional: list customers (for testing) ──────────────────
-
+ 
+ 
+# ─── List customers (for testing) ────────────────────────────
+ 
 @app.get("/customers")
 def list_customers(limit: int = 10):
     data = fb_get("record/account", {
@@ -258,10 +252,9 @@ def list_customers(limit: int = 10):
         "source":  "fireberry",
         "sample":  records,
     }
-
+ 
 @app.get("/columns")
 def get_columns():
-    """Returns the unified field names agents should expect"""
     return {
         "customer_fields": ["customer_name", "phone", "email", "customer_id", "status", "assigned_agent", "notes"],
         "order_fields":    ["order_number", "customer_name", "product", "status", "price", "order_date", "expected_delivery", "notes"],
