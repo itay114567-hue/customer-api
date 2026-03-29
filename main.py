@@ -2,6 +2,12 @@ from fastapi import FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 import requests
 import os
+import time
+ 
+# ─── Deduplication cache ──────────────────────────────────────
+# מונע יצירת טיקט כפול לאותו לקוח תוך 60 שניות
+_escalation_cache: dict = {}
+COOLDOWN_SECONDS = 60
  
 app = FastAPI(title="Customer Data API - Fireberry", version="2.0.0")
  
@@ -168,6 +174,19 @@ def escalate(
  
     if not customer_id:
         return {"success": False, "error": "customer_id is required"}
+ 
+    # ─── Deduplication check ──────────────────────────────────
+    cache_key = f"{customer_id}:{intent}"
+    last_time = _escalation_cache.get(cache_key, 0)
+    now = time.time()
+    if now - last_time < COOLDOWN_SECONDS:
+        return {
+            "success": True,
+            "ticket_id": "duplicate_skipped",
+            "message": f"Ticket already created for this customer in the last {COOLDOWN_SECONDS}s"
+        }
+    _escalation_cache[cache_key] = now
+    # ─────────────────────────────────────────────────────────
  
     priority_map = {"low": 1, "medium": 2, "high": 3, "urgent": 4}
  
