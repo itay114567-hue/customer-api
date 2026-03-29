@@ -34,12 +34,12 @@ def fb_get(path: str, params: dict = {}):
     return data
 
 def fb_post(path: str, body: dict):
-    """Generic POST to Fireberry API"""
     url = f"{FIREBERRY_BASE}/{path}"
     res = requests.post(url, headers=fb_headers(), json=body, timeout=10)
     data = res.json()
+    print(f"FB POST {path} → status={res.status_code} body={data}")  # ← הוסיפי שורה זו
     if not data.get("success"):
-        raise HTTPException(status_code=502, detail=f"Fireberry error: {data.get('message')}")
+        raise HTTPException(status_code=502, detail=f"Fireberry error: {data.get('message')} | full: {data}")
     return data
 
 def normalize_phone(phone: str) -> str:
