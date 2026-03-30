@@ -10,7 +10,7 @@ import time
 _escalation_cache: dict = {}
 COOLDOWN_SECONDS = 60
 
-app = FastAPI(title="Customer Data API - Fireberry & Twilio", version="3.6.0")
+app = FastAPI(title="Customer Data API - Fireberry & Twilio", version="3.7.0")
 
 app.add_middleware(
     CORSMiddleware,
@@ -71,7 +71,6 @@ def send_whatsapp(to_number: str, message_body: str):
 @app.get("/customer/{identifier}", response_class=PlainTextResponse)
 def get_customer(identifier: str):
     norm = normalize_phone(identifier)
-    # שליפת רשומות מ-Fireberry
     data = fb_get("record/account", {"fields": "accountid,accountname,telephone1,status", "page_size": "100"})
     records = data.get("data", {}).get("Records", [])
     
@@ -105,23 +104,23 @@ def api_send_response(phone: str, message: str):
         return f"Failed: {str(e)}"
 
 # ════════════════════════════════════════════════════════════
-#  WEBHOOK - המשודרג עם לוגים לבדיקת CrewAI
+#  WEBHOOK - המשודרג עם שמות משתנים תואמים ל-Studio
 # ════════════════════════════════════════════════════════════
 
 @app.post("/webhook/whatsapp")
 async def webhook(background_tasks: BackgroundTasks, Body: str = Form(...), From: str = Form(...)):
     print(f"📨 NEW MESSAGE | From: {From} | Body: {Body}")
     
-    # בדיקת משתני סביבה בלוגים
-    print(f"🔍 DEBUG | URL: {CREWAI_KICKOFF_URL}")
-    print(f"🔍 DEBUG | API Key Loaded: {bool(CREWAI_API_KEY)}")
-
     if CREWAI_KICKOFF_URL and CREWAI_API_KEY:
         def start_crew():
+            # עדכון ה-Payload שיתאים בדיוק לדרישות ה-Inputs ב-Crew Studio
             payload = {
                 "inputs": {
-                    "raw_message": Body,
-                    "order_number_or_phone": From.replace("whatsapp:", "")
+                    # שינוי מ-raw_message ל-customer_input כדי להתאים ל-Studio
+                    "customer_input": Body,
+                    "order_number_or_phone": From.replace("whatsapp:", ""),
+                    # הוספת formatted_message כדי למנוע שגיאת 422 Missing inputs
+                    "formatted_message": "New WhatsApp Inquiry"
                 }
             }
             
@@ -132,16 +131,16 @@ async def webhook(background_tasks: BackgroundTasks, Body: str = Form(...), From
             try:
                 print(f"🚀 SENDING TO CREWAI: {CREWAI_KICKOFF_URL}")
                 response = requests.post(CREWAI_KICKOFF_URL, json=payload, headers=headers, timeout=20)
-                # הדפסת התשובה מה-Crew כדי לדעת אם ההפעלה הצליחה
+                # הדפסת התשובה כדי לוודא שקיבלנו 200 OK
                 print(f"✅ CREWAI RESPONSE: {response.status_code} - {response.text}")
             except Exception as e:
                 print(f"❌ CREWAI CONNECTION ERROR: {str(e)}")
         
         background_tasks.add_task(start_crew)
     else:
-        print("⚠️ SKIPPING CREWAI: Missing URL or API Key in Environment Variables!")
+        print("⚠️ SKIPPING CREWAI: Missing URL or API Key!")
     
     return PlainTextResponse('<?xml version="1.0" encoding="UTF-8"?><Response></Response>')
 
 @app.get("/")
-def root(): return {"status": "online", "version": "3.6.0"}
+def root(): return {"status": "online", "version": "3.7.0"}
