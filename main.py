@@ -10,7 +10,7 @@ import time
 _escalation_cache: dict = {}
 COOLDOWN_SECONDS = 60
 
-app = FastAPI(title="Customer Data API - Fireberry & Twilio", version="3.7.0")
+app = FastAPI(title="Customer Data API - Fireberry & Twilio", version="3.8.0")
 
 app.add_middleware(
     CORSMiddleware,
@@ -104,7 +104,7 @@ def api_send_response(phone: str, message: str):
         return f"Failed: {str(e)}"
 
 # ════════════════════════════════════════════════════════════
-#  WEBHOOK - המשודרג עם שמות משתנים תואמים ל-Studio
+#  WEBHOOK - עם תיקון ה-422 והסוגריים המסולסלים
 # ════════════════════════════════════════════════════════════
 
 @app.post("/webhook/whatsapp")
@@ -113,25 +113,23 @@ async def webhook(background_tasks: BackgroundTasks, Body: str = Form(...), From
     
     if CREWAI_KICKOFF_URL and CREWAI_API_KEY:
         def start_crew():
-            # עדכון ה-Payload שיתאים בדיוק לדרישות ה-Inputs ב-Crew Studio
+            # שליחת המפתחות בפורמט כפול כדי לוודא ש-CrewAI מוצא אותם
             payload = {
                 "inputs": {
-                    # שינוי מ-raw_message ל-customer_input כדי להתאים ל-Studio
                     "customer_input": Body,
+                    "{customer_input}": Body,  # תיקון לשגיאה מהלוגים
                     "order_number_or_phone": From.replace("whatsapp:", ""),
-                    # הוספת formatted_message כדי למנוע שגיאת 422 Missing inputs
-                    "formatted_message": "New WhatsApp Inquiry"
+                    "formatted_message": "New Inquiry",
+                    "{formatted_message}": "New Inquiry"
                 }
             }
             
-            # וידוא פורמט Bearer Token
             token = CREWAI_API_KEY if CREWAI_API_KEY.startswith("Bearer ") else f"Bearer {CREWAI_API_KEY}"
             headers = {"Authorization": token, "Content-Type": "application/json"}
             
             try:
                 print(f"🚀 SENDING TO CREWAI: {CREWAI_KICKOFF_URL}")
                 response = requests.post(CREWAI_KICKOFF_URL, json=payload, headers=headers, timeout=20)
-                # הדפסת התשובה כדי לוודא שקיבלנו 200 OK
                 print(f"✅ CREWAI RESPONSE: {response.status_code} - {response.text}")
             except Exception as e:
                 print(f"❌ CREWAI CONNECTION ERROR: {str(e)}")
@@ -143,4 +141,4 @@ async def webhook(background_tasks: BackgroundTasks, Body: str = Form(...), From
     return PlainTextResponse('<?xml version="1.0" encoding="UTF-8"?><Response></Response>')
 
 @app.get("/")
-def root(): return {"status": "online", "version": "3.7.0"}
+def root(): return {"status": "online", "version": "3.8.0"}
