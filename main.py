@@ -10,7 +10,7 @@ import time
 _escalation_cache: dict = {}
 COOLDOWN_SECONDS = 60
 
-app = FastAPI(title="Customer Data API - Fireberry & Twilio", version="3.13.0")
+app = FastAPI(title="Customer Data API - Fireberry & Twilio", version="3.16.0")
 
 app.add_middleware(
     CORSMiddleware,
@@ -70,8 +70,13 @@ def send_whatsapp(to_number: str, message_body: str):
 
 @app.get("/customer/{identifier}", response_class=PlainTextResponse)
 def get_customer(identifier: str):
+    """
+    שולף נתונים מורחבים מ-Fireberry כולל אימייל וטלפון נוסף
+    """
     norm = normalize_phone(identifier)
-    data = fb_get("record/account", {"fields": "accountid,accountname,telephone1,status", "page_size": "100"})
+    # עדכון: הוספת שדות email ו-telephone2 לבקשה
+    fields = "accountid,accountname,telephone1,telephone2,email,status"
+    data = fb_get("record/account", {"fields": fields, "page_size": "100"})
     records = data.get("data", {}).get("Records", [])
     
     customer = next((r for r in records if normalize_phone(r.get("telephone1")) == norm), None)
@@ -79,7 +84,15 @@ def get_customer(identifier: str):
     if not customer:
         return f"Result: No customer found for {identifier}"
 
-    return f"customer_id: {customer.get('accountid')}\nname: {customer.get('accountname')}\nstatus: {customer.get('status')}\ndata_found: true"
+    # החזרת הפלט בפורמט שהסוכן ב-Studio מצפה לו
+    return (
+        f"customer_id: {customer.get('accountid')}\n"
+        f"customer_name: {customer.get('accountname')}\n"
+        f"phone: {customer.get('telephone1')}\n"
+        f"email: {customer.get('email') if customer.get('email') else 'Not provided'}\n"
+        f"status: {customer.get('status')}\n"
+        f"data_found: true"
+    )
 
 @app.get("/escalate", response_class=PlainTextResponse)
 def escalate(customer_id: str, intent: str = "Unknown", description: str = ""):
@@ -97,6 +110,9 @@ def escalate(customer_id: str, intent: str = "Unknown", description: str = ""):
 
 @app.get("/send_response", response_class=PlainTextResponse)
 def api_send_response(phone: str, message: str):
+    """
+    נקודת קצה לשליחת הודעה סופית ללקוח
+    """
     try:
         sid = send_whatsapp(phone, message)
         return f"Message Sent. SID: {sid}"
@@ -104,7 +120,7 @@ def api_send_response(phone: str, message: str):
         return f"Failed: {str(e)}"
 
 # ════════════════════════════════════════════════════════════
-#  WEBHOOK - התיקון הסופי למניעת הודעת ה-XML (v3.13.0)
+#  WEBHOOK - גרסה 3.16.0 (ללא formatted_message)
 # ════════════════════════════════════════════════════════════
 
 @app.post("/webhook/whatsapp")
@@ -115,12 +131,11 @@ async def webhook(background_tasks: BackgroundTasks, Body: str = Form(...), From
         def start_crew():
             clean_phone = From.replace("whatsapp:", "")
             
-            # שליחת נתונים בפורמט התואם לסוגריים בודדים ב-Studio
+            # עדכון: הסרת formatted_message מהקלט כדי למנוע כפילות ב-Studio
             payload = {
                 "inputs": {
                     "customer_input": Body,
-                    "order_number_or_phone": clean_phone,
-                    "formatted_message": "New WhatsApp Inquiry"
+                    "order_number_or_phone": clean_phone
                 }
             }
             
@@ -128,8 +143,7 @@ async def webhook(background_tasks: BackgroundTasks, Body: str = Form(...), From
             headers = {"Authorization": token, "Content-Type": "application/json"}
             
             try:
-                # אנחנו כבר יודעים שזה מחזיר 200 OK!
-                print(f"🚀 SENDING TO CREWAI (v3.13.0): {CREWAI_KICKOFF_URL}")
+                print(f"🚀 SENDING TO CREWAI (v3.16.0): {CREWAI_KICKOFF_URL}")
                 response = requests.post(CREWAI_KICKOFF_URL, json=payload, headers=headers, timeout=30)
                 print(f"✅ CREWAI RESPONSE: {response.status_code} - {response.text}")
             except Exception as e:
@@ -137,8 +151,8 @@ async def webhook(background_tasks: BackgroundTasks, Body: str = Form(...), From
         
         background_tasks.add_task(start_crew)
     
-    # החזרת טקסט ריק מונעת מ-Twilio לשלוח הודעת XML למשתמש
+    # החזרת טקסט ריק למניעת הודעות XML חוזרות ללקוח
     return PlainTextResponse("") 
 
 @app.get("/")
-def root(): return {"status": "online", "version": "3.13.0"}
+def root(): return {"status": "online", "version": "3.16.0"}
