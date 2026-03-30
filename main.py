@@ -5,154 +5,184 @@ from twilio.rest import Client
 import requests
 import os
 import time
-
+ 
 # --- Deduplication cache ---
 _escalation_cache: dict = {}
 COOLDOWN_SECONDS = 60
-
-app = FastAPI(title="Customer Data API - Fireberry & Twilio", version="3.16.0")
-
+ 
+app = FastAPI(title="Customer Data API - Fireberry & Twilio", version="3.17.0")
+ 
 app.add_middleware(
     CORSMiddleware,
     allow_origins=["*"],
     allow_methods=["*"],
     allow_headers=["*"],
 )
-
+ 
 # --- Environment Variables ---
 FIREBERRY_TOKEN = os.getenv("FIREBERRY_TOKEN")
 FIREBERRY_BASE  = "https://api.fireberry.com/api"
-
+ 
 TWILIO_ACCOUNT_SID  = os.getenv("TWILIO_ACCOUNT_SID")
 TWILIO_AUTH_TOKEN   = os.getenv("TWILIO_AUTH_TOKEN")
 TWILIO_WHATSAPP_NUM = os.getenv("TWILIO_WHATSAPP_NUM", "whatsapp:+14155238886")
-
-# משתני ה-CrewAI
+ 
 CREWAI_API_KEY = os.getenv("CREWAI_API_KEY")
 CREWAI_KICKOFF_URL = os.getenv("CREWAI_KICKOFF_URL")
-
+ 
 # --- HELPERS ---
-
+ 
 def fb_headers():
     return {"tokenid": FIREBERRY_TOKEN, "Content-Type": "application/json"}
-
+ 
 def fb_get(path: str, params: dict = {}):
     url = f"{FIREBERRY_BASE}/{path}"
     res = requests.get(url, headers=fb_headers(), params=params, timeout=10)
     return res.json()
-
+ 
 def fb_post(path: str, body: dict):
     url = f"{FIREBERRY_BASE}/{path}"
     res = requests.post(url, headers=fb_headers(), json=body, timeout=10)
     return res.json()
-
+ 
+def fb_patch(path: str, body: dict):
+    url = f"{FIREBERRY_BASE}/{path}"
+    res = requests.patch(url, headers=fb_headers(), json=body, timeout=10)
+    return res.json()
+ 
 def normalize_phone(phone: str) -> str:
     if not phone: return ""
     return "".join(filter(str.isdigit, phone)).replace("972", "0")
-
+ 
 # --- TWILIO SEND FUNCTION ---
-
+ 
 def send_whatsapp(to_number: str, message_body: str):
     client = Client(TWILIO_ACCOUNT_SID, TWILIO_AUTH_TOKEN)
     clean_number = to_number.replace("whatsapp:", "")
     formatted_number = f"whatsapp:{clean_number}"
-    
     msg = client.messages.create(
         from_=TWILIO_WHATSAPP_NUM,
         body=message_body,
         to=formatted_number
     )
     return msg.sid
-
+ 
 # ════════════════════════════════════════════════════════════
 #  ENDPOINTS
 # ════════════════════════════════════════════════════════════
-
+ 
 @app.get("/customer/{identifier}", response_class=PlainTextResponse)
 def get_customer(identifier: str):
     """
-    שולף נתונים מורחבים מ-Fireberry כולל אימייל וטלפון נוסף
+    שולף נתונים מורחבים מ-Fireberry כולל אימייל
+    תיקון: מנסה emailaddress1 ואז email
     """
     norm = normalize_phone(identifier)
-    # עדכון: הוספת שדות email ו-telephone2 לבקשה
-    fields = "accountid,accountname,telephone1,telephone2,email,status"
+    fields = "accountid,accountname,telephone1,telephone2,emailaddress1,email,status"
     data = fb_get("record/account", {"fields": fields, "page_size": "100"})
     records = data.get("data", {}).get("Records", [])
-    
+ 
     customer = next((r for r in records if normalize_phone(r.get("telephone1")) == norm), None)
-    
+ 
     if not customer:
         return f"Result: No customer found for {identifier}"
-
-    # החזרת הפלט בפורמט שהסוכן ב-Studio מצפה לו
+ 
+    # נסיון לשלוף אימייל מהשדה הנכון
+    email = (
+        customer.get("emailaddress1")
+        or customer.get("email")
+        or "Not provided"
+    )
+ 
+    print(f"CUSTOMER DATA: {customer}")
+ 
     return (
         f"customer_id: {customer.get('accountid')}\n"
         f"customer_name: {customer.get('accountname')}\n"
         f"phone: {customer.get('telephone1')}\n"
-        f"email: {customer.get('email') if customer.get('email') else 'Not provided'}\n"
+        f"email: {email}\n"
         f"status: {customer.get('status')}\n"
         f"data_found: true"
     )
-
+ 
+ 
 @app.get("/escalate", response_class=PlainTextResponse)
 def escalate(customer_id: str, intent: str = "Unknown", description: str = ""):
+    """
+    פותח טיקט ב-Fireberry ומחזיר את מספר הטיקט
+    """
     cache_key = f"{customer_id}:{intent}"
     if time.time() - _escalation_cache.get(cache_key, 0) < COOLDOWN_SECONDS:
         return "Duplicate skipped."
-    
+ 
     _escalation_cache[cache_key] = time.time()
-    body = {"title": f"WhatsApp: {intent}", "description": description, "accountid": customer_id, "casetypecode": 1}
+ 
+    body = {
+        "title": f"WhatsApp: {intent}",
+        "description": description,
+        "accountid": customer_id,
+        "casetypecode": 1
+    }
     res = fb_post("record/Cases", body)
-    
+    print(f"FIREBERRY ESCALATE RESPONSE: {res}")
+ 
     if res.get("success"):
-        return f"Success: Ticket ID {res.get('data', {}).get('casesid')}"
-    return f"Error: {res.get('message')}"
-
+        data = res.get("data", {})
+        # מנסה את כל האפשרויות לשמות השדה
+        ticket_id = (
+            data.get("casesid")
+            or data.get("id")
+            or data.get("ticketid")
+            or data.get("case_id")
+            or str(data)
+        )
+        return f"Success: Ticket ID {ticket_id}"
+ 
+    return f"Error: {res.get('message', 'Unknown error')}"
+ 
+ 
 @app.get("/send_response", response_class=PlainTextResponse)
 def api_send_response(phone: str, message: str):
     """
-    נקודת קצה לשליחת הודעה סופית ללקוח
+    שולח הודעת WhatsApp ללקוח
     """
     try:
         sid = send_whatsapp(phone, message)
         return f"Message Sent. SID: {sid}"
     except Exception as e:
         return f"Failed: {str(e)}"
-
+ 
+ 
 # ════════════════════════════════════════════════════════════
-#  WEBHOOK - גרסה 3.16.0 (ללא formatted_message)
+#  WEBHOOK - גרסה 3.17.0
 # ════════════════════════════════════════════════════════════
-
+ 
 @app.post("/webhook/whatsapp")
 async def webhook(background_tasks: BackgroundTasks, Body: str = Form(...), From: str = Form(...)):
     print(f"📨 NEW MESSAGE | From: {From} | Body: {Body}")
-    
+ 
     if CREWAI_KICKOFF_URL and CREWAI_API_KEY:
         def start_crew():
             clean_phone = From.replace("whatsapp:", "")
-            
-            # עדכון: הסרת formatted_message מהקלט כדי למנוע כפילות ב-Studio
             payload = {
                 "inputs": {
                     "customer_input": Body,
                     "order_number_or_phone": clean_phone
                 }
             }
-            
             token = CREWAI_API_KEY if CREWAI_API_KEY.startswith("Bearer ") else f"Bearer {CREWAI_API_KEY}"
             headers = {"Authorization": token, "Content-Type": "application/json"}
-            
             try:
-                print(f"🚀 SENDING TO CREWAI (v3.16.0): {CREWAI_KICKOFF_URL}")
+                print(f"🚀 SENDING TO CREWAI (v3.17.0): {CREWAI_KICKOFF_URL}")
                 response = requests.post(CREWAI_KICKOFF_URL, json=payload, headers=headers, timeout=30)
                 print(f"✅ CREWAI RESPONSE: {response.status_code} - {response.text}")
             except Exception as e:
                 print(f"❌ CREWAI CONNECTION ERROR: {str(e)}")
-        
+ 
         background_tasks.add_task(start_crew)
-    
-    # החזרת טקסט ריק למניעת הודעות XML חוזרות ללקוח
-    return PlainTextResponse("") 
-
+ 
+    return PlainTextResponse("")
+ 
+ 
 @app.get("/")
-def root(): return {"status": "online", "version": "3.16.0"}
+def root(): return {"status": "online", "version": "3.17.0"}
