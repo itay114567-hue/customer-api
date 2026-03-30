@@ -10,7 +10,7 @@ import time
 _escalation_cache: dict = {}
 COOLDOWN_SECONDS = 60
 
-app = FastAPI(title="Customer Data API - Fireberry & Twilio", version="3.5.0")
+app = FastAPI(title="Customer Data API - Fireberry & Twilio", version="3.6.0")
 
 app.add_middleware(
     CORSMiddleware,
@@ -27,8 +27,9 @@ TWILIO_ACCOUNT_SID  = os.getenv("TWILIO_ACCOUNT_SID")
 TWILIO_AUTH_TOKEN   = os.getenv("TWILIO_AUTH_TOKEN")
 TWILIO_WHATSAPP_NUM = os.getenv("TWILIO_WHATSAPP_NUM", "whatsapp:+14155238886")
 
+# משתני ה-CrewAI
 CREWAI_API_KEY = os.getenv("CREWAI_API_KEY")
-CREWAI_KICKOFF_URL = os.getenv("CREWAI_KICKOFF_URL") # ה-URL מה-CrewAI Enterprise
+CREWAI_KICKOFF_URL = os.getenv("CREWAI_KICKOFF_URL")
 
 # --- HELPERS ---
 
@@ -53,7 +54,6 @@ def normalize_phone(phone: str) -> str:
 
 def send_whatsapp(to_number: str, message_body: str):
     client = Client(TWILIO_ACCOUNT_SID, TWILIO_AUTH_TOKEN)
-    # מוודא שהמספר בפורמט וואטסאפ
     clean_number = to_number.replace("whatsapp:", "")
     formatted_number = f"whatsapp:{clean_number}"
     
@@ -71,6 +71,7 @@ def send_whatsapp(to_number: str, message_body: str):
 @app.get("/customer/{identifier}", response_class=PlainTextResponse)
 def get_customer(identifier: str):
     norm = normalize_phone(identifier)
+    # שליפת רשומות מ-Fireberry
     data = fb_get("record/account", {"fields": "accountid,accountname,telephone1,status", "page_size": "100"})
     records = data.get("data", {}).get("Records", [])
     
@@ -97,9 +98,6 @@ def escalate(customer_id: str, intent: str = "Unknown", description: str = ""):
 
 @app.get("/send_response", response_class=PlainTextResponse)
 def api_send_response(phone: str, message: str):
-    """
-    Endpoint שהסוכן האחרון ב-CrewAI קורא לו כדי לשלוח את ההודעה ללקוח.
-    """
     try:
         sid = send_whatsapp(phone, message)
         return f"Message Sent. SID: {sid}"
@@ -107,14 +105,17 @@ def api_send_response(phone: str, message: str):
         return f"Failed: {str(e)}"
 
 # ════════════════════════════════════════════════════════════
-#  WEBHOOK - הלב של המערכת
+#  WEBHOOK - המשודרג עם לוגים לבדיקת CrewAI
 # ════════════════════════════════════════════════════════════
 
 @app.post("/webhook/whatsapp")
 async def webhook(background_tasks: BackgroundTasks, Body: str = Form(...), From: str = Form(...)):
-    print(f"Incoming from {From}: {Body}")
+    print(f"📨 NEW MESSAGE | From: {From} | Body: {Body}")
     
-    # שליחה ל-CrewAI Enterprise ברקע כדי לא לתקוע את Twilio
+    # בדיקת משתני סביבה בלוגים
+    print(f"🔍 DEBUG | URL: {CREWAI_KICKOFF_URL}")
+    print(f"🔍 DEBUG | API Key Loaded: {bool(CREWAI_API_KEY)}")
+
     if CREWAI_KICKOFF_URL and CREWAI_API_KEY:
         def start_crew():
             payload = {
@@ -123,12 +124,24 @@ async def webhook(background_tasks: BackgroundTasks, Body: str = Form(...), From
                     "order_number_or_phone": From.replace("whatsapp:", "")
                 }
             }
-            headers = {"Authorization": f"Bearer {CREWAI_API_KEY}", "Content-Type": "application/json"}
-            requests.post(CREWAI_KICKOFF_URL, json=payload, headers=headers)
+            
+            # וידוא פורמט Bearer Token
+            token = CREWAI_API_KEY if CREWAI_API_KEY.startswith("Bearer ") else f"Bearer {CREWAI_API_KEY}"
+            headers = {"Authorization": token, "Content-Type": "application/json"}
+            
+            try:
+                print(f"🚀 SENDING TO CREWAI: {CREWAI_KICKOFF_URL}")
+                response = requests.post(CREWAI_KICKOFF_URL, json=payload, headers=headers, timeout=20)
+                # הדפסת התשובה מה-Crew כדי לדעת אם ההפעלה הצליחה
+                print(f"✅ CREWAI RESPONSE: {response.status_code} - {response.text}")
+            except Exception as e:
+                print(f"❌ CREWAI CONNECTION ERROR: {str(e)}")
         
         background_tasks.add_task(start_crew)
+    else:
+        print("⚠️ SKIPPING CREWAI: Missing URL or API Key in Environment Variables!")
     
     return PlainTextResponse('<?xml version="1.0" encoding="UTF-8"?><Response></Response>')
 
 @app.get("/")
-def root(): return {"status": "online"}
+def root(): return {"status": "online", "version": "3.6.0"}
