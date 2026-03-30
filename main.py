@@ -302,9 +302,3 @@ def get_columns():
         "customer_fields": ["customer_name", "phone", "email", "customer_id", "status", "assigned_agent", "notes"],
         "order_fields":    ["order_number", "customer_name", "product", "status", "price", "order_date", "expected_delivery", "notes"],
     }
-
-@app.get("/debug-case/{case_id}")
-def debug_case(case_id: str):
-    """זמני — מחזיר raw data של קריאה כדי לראות prioritycode"""
-    data = fb_get(f"record/Cases/{case_id}")
-    return data
