@@ -10,7 +10,7 @@ import time
 _escalation_cache: dict = {}
 COOLDOWN_SECONDS = 60
 
-app = FastAPI(title="Customer Data API - Fireberry & Twilio", version="3.10.0")
+app = FastAPI(title="Customer Data API - Fireberry & Twilio", version="3.12.0")
 
 app.add_middleware(
     CORSMiddleware,
@@ -104,7 +104,7 @@ def api_send_response(phone: str, message: str):
         return f"Failed: {str(e)}"
 
 # ════════════════════════════════════════════════════════════
-#  WEBHOOK - גרסה 3.10.0 (אחרי תיקון הסוגריים ב-Studio)
+#  WEBHOOK - הסנכרון הסופי עם ה-Studio (v3.12.0)
 # ════════════════════════════════════════════════════════════
 
 @app.post("/webhook/whatsapp")
@@ -115,7 +115,8 @@ async def webhook(background_tasks: BackgroundTasks, Body: str = Form(...), From
         def start_crew():
             clean_phone = From.replace("whatsapp:", "")
             
-            # מבנה ה-Payload המעודכן והנקי
+            # עכשיו כשיש סוגריים בודדים ב-Studio, אנחנו שולחים את המפתחות
+            # בדיוק כפי שהם מופיעים בתוך הסוגריים
             payload = {
                 "inputs": {
                     "customer_input": Body,
@@ -125,13 +126,10 @@ async def webhook(background_tasks: BackgroundTasks, Body: str = Form(...), From
             }
             
             token = CREWAI_API_KEY if CREWAI_API_KEY.startswith("Bearer ") else f"Bearer {CREWAI_API_KEY}"
-            headers = {
-                "Authorization": token, 
-                "Content-Type": "application/json"
-            }
+            headers = {"Authorization": token, "Content-Type": "application/json"}
             
             try:
-                print(f"🚀 SENDING TO CREWAI (v3.10.0): {CREWAI_KICKOFF_URL}")
+                print(f"🚀 SENDING TO CREWAI (v3.12.0): {CREWAI_KICKOFF_URL}")
                 response = requests.post(CREWAI_KICKOFF_URL, json=payload, headers=headers, timeout=30)
                 print(f"✅ CREWAI RESPONSE: {response.status_code} - {response.text}")
             except Exception as e:
@@ -142,4 +140,4 @@ async def webhook(background_tasks: BackgroundTasks, Body: str = Form(...), From
     return PlainTextResponse('<?xml version="1.0" encoding="UTF-8"?><Response></Response>')
 
 @app.get("/")
-def root(): return {"status": "online", "version": "3.10.0"}
+def root(): return {"status": "online", "version": "3.12.0"}
