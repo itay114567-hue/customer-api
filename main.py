@@ -5,36 +5,36 @@ from twilio.rest import Client
 import requests
 import os
 import time
-
+ 
 # ─── Deduplication cache ──────────────────────────────────────
 _escalation_cache: dict = {}
 COOLDOWN_SECONDS = 10
-
-app = FastAPI(title="Customer Data API - Fireberry & Twilio & CrewAI", version="4.0.0")
-
+ 
+app = FastAPI(title="Customer Data API - Fireberry & Twilio & CrewAI", version="4.1.0")
+ 
 app.add_middleware(
     CORSMiddleware,
     allow_origins=["*"],
     allow_methods=["*"],
     allow_headers=["*"],
 )
-
+ 
 # ─── Environment Variables ────────────────────────────────────
 FIREBERRY_TOKEN     = os.getenv("FIREBERRY_TOKEN")
 FIREBERRY_BASE      = "https://api.fireberry.com/api"
-
+ 
 TWILIO_ACCOUNT_SID  = os.getenv("TWILIO_ACCOUNT_SID")
 TWILIO_AUTH_TOKEN   = os.getenv("TWILIO_AUTH_TOKEN")
 TWILIO_WHATSAPP_NUM = os.getenv("TWILIO_WHATSAPP_NUM", "whatsapp:+14155238886")
-
+ 
 CREWAI_API_KEY      = os.getenv("CREWAI_API_KEY")
 CREWAI_KICKOFF_URL  = os.getenv("CREWAI_KICKOFF_URL")
-
+ 
 # ─── Fireberry Helpers ────────────────────────────────────────
-
+ 
 def fb_headers():
     return {"tokenid": FIREBERRY_TOKEN, "Content-Type": "application/json"}
-
+ 
 def fb_get(path: str, params: dict = {}):
     url = f"{FIREBERRY_BASE}/{path}"
     res = requests.get(url, headers=fb_headers(), params=params, timeout=10)
@@ -44,7 +44,7 @@ def fb_get(path: str, params: dict = {}):
     if not data.get("success"):
         raise HTTPException(status_code=502, detail=f"Fireberry error: {data.get('message')}")
     return data
-
+ 
 def fb_post(path: str, body: dict):
     url = f"{FIREBERRY_BASE}/{path}"
     res = requests.post(url, headers=fb_headers(), json=body, timeout=10)
@@ -53,14 +53,14 @@ def fb_post(path: str, body: dict):
     if not data.get("success"):
         raise HTTPException(status_code=502, detail=f"Fireberry error: {data.get('message')} | full: {data}")
     return data
-
+ 
 def fb_patch(path: str, body: dict):
     url = f"{FIREBERRY_BASE}/{path}"
     res = requests.patch(url, headers=fb_headers(), json=body, timeout=10)
     data = res.json()
     print(f"FB PATCH {path} → status={res.status_code} body={data}")
     return data
-
+ 
 def normalize_phone(phone: str) -> str:
     if not phone:
         return ""
@@ -68,15 +68,13 @@ def normalize_phone(phone: str) -> str:
     if digits.startswith("972"):
         digits = "0" + digits[3:]
     return digits
-
+ 
 # ─── Twilio Helper ────────────────────────────────────────────
-
+ 
 def send_whatsapp(to_number: str, message_body: str):
     from urllib.parse import unquote
     client = Client(TWILIO_ACCOUNT_SID, TWILIO_AUTH_TOKEN)
-    # Decode message in case it arrived URL-encoded
     message_body = unquote(message_body)
-    # Normalize phone to +972 format for Twilio
     clean = to_number.replace("whatsapp:", "").strip()
     clean = clean.replace("-", "").replace(" ", "")
     if clean.startswith("05"):
@@ -92,9 +90,9 @@ def send_whatsapp(to_number: str, message_body: str):
         to=formatted,
     )
     return msg.sid
-
+ 
 # ─── Intent → Fireberry mappings ─────────────────────────────
-
+ 
 INTENT_HEBREW = {
     "Refund_Request":       "בקשת החזר כספי",
     "Refund+Request":       "בקשת החזר כספי",
@@ -105,55 +103,79 @@ INTENT_HEBREW = {
     "Unknown_Query":        "פנייה לא מזוהה",
     "Unknown+Query":        "פנייה לא מזוהה",
 }
-
-# casetypecode: 1=בעיה, 2=שאלה, 3=בקשה, 4=תקלה
+ 
 INTENT_TYPE = {
-    "Refund_Request":       3,   # בקשה
+    "Refund_Request":       3,
     "Refund+Request":       3,
-    "Complaint":            1,   # בעיה
-    "Human_Agent_Request":  2,   # שאלה
+    "Complaint":            1,
+    "Human_Agent_Request":  2,
     "Human+Agent+Request":  2,
-    "Status_Check":         2,   # שאלה
+    "Status_Check":         2,
     "Unknown_Query":        2,
     "Unknown+Query":        2,
 }
-
-# prioritycode: 1=רגילה, 2=גבוהה, 3=נמוכה
+ 
 INTENT_PRIORITY = {
-    "Refund_Request":       2,   # גבוהה
+    "Refund_Request":       2,
     "Refund+Request":       2,
-    "Complaint":            2,   # גבוהה
-    "Human_Agent_Request":  1,   # רגילה
+    "Complaint":            2,
+    "Human_Agent_Request":  1,
     "Human+Agent+Request":  1,
-    "Status_Check":         3,   # נמוכה
+    "Status_Check":         3,
     "Unknown_Query":        3,
     "Unknown+Query":        3,
 }
-
+ 
+# ─── Note field discovery (runs once, cached) ────────────────
+# FIX: במקום להניח את שם השדה, מגלים אותו דינמית בפעם הראשונה
+_note_id_field: str | None = None
+ 
+def _get_note_id_field() -> str:
+    """
+    מגלה דינמית איך Fireberry קורא לשדה ה-ID של Note.
+    מנסה לפי סדר עדיפות ומחזיר את הראשון שעובד.
+    מאחסן בזיכרון כדי לא לחזור על הבדיקה.
+    """
+    global _note_id_field
+    if _note_id_field:
+        return _note_id_field
+ 
+    # נסה לשלוף note קיים ולראות אילו שדות יש בו
+    try:
+        data    = fb_get("record/note", {"page_size": "1"})
+        records = data.get("data", {}).get("Records", [])
+        if records:
+            fields = list(records[0].keys())
+            print(f"DEBUG note fields: {fields}")
+            # עדיפות לפי מה שסביר יותר ב-Fireberry
+            for candidate in ["casesid", "regardingobjectid", "relatedtoid", "parentid", "regardingid"]:
+                if candidate in fields:
+                    _note_id_field = candidate
+                    print(f"DEBUG using note field: {_note_id_field}")
+                    return _note_id_field
+    except Exception as e:
+        print(f"DEBUG could not fetch note fields: {e}")
+ 
+    # fallback — ננסה את הכי סביר
+    _note_id_field = "casesid"
+    return _note_id_field
+ 
 # ─── Ticket creator (shared logic) ───────────────────────────
-
+ 
 def _create_fireberry_ticket(
     customer_id: str,
     intent: str,
     description: str,
     channel: str = "whatsapp",
-    auto_close: bool = False,   # True = הפנייה נסגרה אוטומטית
+    auto_close: bool = False,
 ) -> dict:
-    """
-    יוצר טיקט ב-Fireberry.
-    auto_close=True  → statuscode=2 (סגור)
-    auto_close=False → statuscode=1 (פתוח)
-    """
     intent_heb  = INTENT_HEBREW.get(intent, intent)
     case_type   = INTENT_TYPE.get(intent, 1)
     priority    = INTENT_PRIORITY.get(intent, 1)
-    # statuscode ב-Fireberry: 1=פתוח, 6=הושלם (confirmed from API)
-    # נציג אנושי נדרש → פתוח (1)
-    # נפתר אוטומטית  → הושלם (6)
     status_code = 6 if auto_close else 1
-
+ 
     title = f"פנייה - {intent_heb}" if intent else "פנייה חדשה"
-
+ 
     payload = {
         "title":        title,
         "description":  description,
@@ -174,40 +196,41 @@ def _create_fireberry_ticket(
         or ""
     )
     print(f"DEBUG ticket_id: record={_record}, ticket_id={ticket_id}")
-
-    # ─── Add note with channel / intent context ───────────────
+ 
+    # ─── FIX: Add note with dynamic field name ────────────────
     if ticket_id:
         try:
-            note_text = (
+            note_field = _get_note_id_field()
+            note_text  = (
                 f"Channel: {channel}\n"
                 f"Intent: {intent}\n"
                 f"Auto-closed: {auto_close}\n\n"
                 f"Message / Summary:\n{description}"
             )
             fb_post("record/note", {
-                "regardingid":   ticket_id,
-                "regardingtype": "Cases",
-                "notetext": note_text,
-                "subject":  "Agent escalation",
+                note_field:        ticket_id,   # ✅ שדה דינמי במקום "regardingid" קשיח
+                "regardingtype":   "Cases",
+                "notetext":        note_text,
+                "subject":         "Agent escalation",
             })
         except Exception as e:
             print(f"Note creation failed (non-fatal): {e}")
-
+ 
     return {
         "ticket_id":  ticket_id,
         "status":     "closed" if auto_close else "open",
         "priority":   priority,
         "case_type":  case_type,
     }
-
+ 
 # ════════════════════════════════════════════════════════════
 #  ENDPOINTS
 # ════════════════════════════════════════════════════════════
-
+ 
 @app.get("/")
 def root():
-    return {"status": "online", "version": "4.0.0"}
-
+    return {"status": "online", "version": "4.1.0"}
+ 
 @app.get("/health")
 def health():
     if not FIREBERRY_TOKEN:
@@ -217,24 +240,19 @@ def health():
         return {"status": "ok", "crm": "fireberry"}
     except Exception as e:
         return {"status": "error", "detail": str(e)}
-
+ 
 # ─── Customer lookup ──────────────────────────────────────────
-
+ 
 @app.get("/customer/{identifier}", response_class=PlainTextResponse)
 def get_customer(identifier: str):
-    """
-    שולף נתוני לקוח מ-Fireberry לפי טלפון / מייל / מספר הזמנה.
-    מחזיר plain-text שמתאים לקריאה מסוכן CrewAI.
-    """
     if not FIREBERRY_TOKEN:
         return "Result: FIREBERRY_TOKEN not configured"
-
+ 
     identifier = identifier.strip()
     norm       = normalize_phone(identifier)
-
+ 
     fields = "accountid,accountname,telephone1,telephone2,emailaddress1,emailaddress2,status"
-
-    # 1. חיפוש לפי טלפון
+ 
     if norm.startswith("0") or norm.startswith("972"):
         try:
             data    = fb_get("record/account", {"fields": fields, "page_size": "100"})
@@ -255,8 +273,7 @@ def get_customer(identifier: str):
                     )
         except Exception as e:
             print(f"Phone search error: {e}")
-
-    # 2. חיפוש לפי מייל
+ 
     if "@" in identifier:
         try:
             data    = fb_get("record/account", {"fields": fields, "page_size": "100"})
@@ -276,8 +293,7 @@ def get_customer(identifier: str):
                     )
         except Exception as e:
             print(f"Email search error: {e}")
-
-    # 3. חיפוש לפי מספר הזמנה
+ 
     try:
         data    = fb_get("record/opportunity", {
             "fields": "opportunityid,name,accountname,statuscode,totalamount,createdon,estimatedclosedate,description",
@@ -298,11 +314,11 @@ def get_customer(identifier: str):
                 )
     except Exception as e:
         print(f"Order search error: {e}")
-
+ 
     return f"Result: No customer found for {identifier}"
-
-# ─── Escalate (open ticket, stays open for human) ────────────
-
+ 
+# ─── Escalate ────────────────────────────────────────────────
+ 
 @app.get("/escalate", response_class=PlainTextResponse)
 def escalate(
     customer_id: str = "",
@@ -310,19 +326,16 @@ def escalate(
     description: str = "",
     channel: str     = "whatsapp",
 ):
-    """
-    פותח טיקט פתוח ב-Fireberry — נדרש מענה אנושי.
-    """
     if not FIREBERRY_TOKEN:
         return "Error: FIREBERRY_TOKEN not configured"
     if not customer_id:
         return "Error: customer_id is required"
-
+ 
     cache_key = f"{customer_id}:{intent}"
     if time.time() - _escalation_cache.get(cache_key, 0) < COOLDOWN_SECONDS:
         return "Duplicate skipped."
     _escalation_cache[cache_key] = time.time()
-
+ 
     try:
         result = _create_fireberry_ticket(
             customer_id=customer_id,
@@ -335,9 +348,9 @@ def escalate(
         return f"ticket_created: true\nticket_id: {tid}\nstatus: open\npriority: {result['priority']}"
     except Exception as e:
         return f"Error: {str(e)}"
-
-# ─── Auto-close ticket (resolved by agents) ──────────────────
-
+ 
+# ─── Auto-close ticket ────────────────────────────────────────
+ 
 @app.get("/close_ticket", response_class=PlainTextResponse)
 def close_ticket(
     customer_id: str = "",
@@ -345,15 +358,11 @@ def close_ticket(
     description: str = "",
     channel: str     = "whatsapp",
 ):
-    """
-    פותח טיקט סגור ב-Fireberry — הפנייה נפתרה אוטומטית ע"י הסוכנים.
-    description אמור להכיל סיכום השיחה.
-    """
     if not FIREBERRY_TOKEN:
         return "Error: FIREBERRY_TOKEN not configured"
     if not customer_id:
         return "Error: customer_id is required"
-
+ 
     try:
         result = _create_fireberry_ticket(
             customer_id=customer_id,
@@ -366,35 +375,27 @@ def close_ticket(
         return f"ticket_created: true\nticket_id: {tid}\nstatus: closed"
     except Exception as e:
         return f"Error: {str(e)}"
-
+ 
 # ─── Send WhatsApp via Twilio ─────────────────────────────────
-
+ 
 @app.get("/send_response", response_class=PlainTextResponse)
 def api_send_response(phone: str, message: str):
-    """
-    שולח הודעת WhatsApp ללקוח דרך Twilio.
-    קרוי ע"י סוכן CrewAI לאחר שגיבש תשובה.
-    """
     try:
         sid = send_whatsapp(phone, message)
         return f"Message Sent. SID: {sid}"
     except Exception as e:
         return f"Failed: {str(e)}"
-
+ 
 # ─── Webhook (incoming WhatsApp → CrewAI) ────────────────────
-
+ 
 @app.post("/webhook/whatsapp")
 async def webhook(
     background_tasks: BackgroundTasks,
     Body: str = Form(...),
     From: str = Form(...),
 ):
-    """
-    מקבל הודעת WhatsApp נכנסת מ-Twilio.
-    מפעיל CrewAI crew ברקע עם מספר הטלפון ותוכן ההודעה.
-    """
     print(f"📨 NEW MESSAGE | From: {From} | Body: {Body}")
-
+ 
     if CREWAI_KICKOFF_URL and CREWAI_API_KEY:
         def start_crew():
             clean_phone = From.replace("whatsapp:", "")
@@ -402,7 +403,7 @@ async def webhook(
                 "inputs": {
                     "customer_input":          Body,
                     "order_number_or_phone":   clean_phone,
-                    "customer_phone":          clean_phone,   # extra alias
+                    "customer_phone":          clean_phone,
                 }
             }
             token   = CREWAI_API_KEY if CREWAI_API_KEY.startswith("Bearer ") else f"Bearer {CREWAI_API_KEY}"
@@ -413,23 +414,19 @@ async def webhook(
                 print(f"✅ CREWAI RESPONSE: {response.status_code} - {response.text}")
             except Exception as e:
                 print(f"❌ CREWAI ERROR: {str(e)}")
-
+ 
         background_tasks.add_task(start_crew)
-
-    # חייב להחזיר 200 ריק לטוויליו
+ 
     from fastapi.responses import PlainTextResponse as PR
     return PR("")
-
+ 
 # ─── POST ticket (legacy / external) ─────────────────────────
-
+ 
 @app.post("/ticket")
 def create_ticket(body: dict):
-    """
-    יצירת טיקט דרך POST מגורם חיצוני.
-    """
     if not FIREBERRY_TOKEN:
         raise HTTPException(status_code=500, detail="FIREBERRY_TOKEN not configured")
-
+ 
     auto_close = body.get("auto_close", False)
     result = _create_fireberry_ticket(
         customer_id=body.get("customer_id", ""),
@@ -439,9 +436,9 @@ def create_ticket(body: dict):
         auto_close=auto_close,
     )
     return {"success": True, **result}
-
+ 
 # ─── Debug / Utility ──────────────────────────────────────────
-
+ 
 @app.get("/customers")
 def list_customers(limit: int = 10):
     data    = fb_get("record/account", {
@@ -454,7 +451,7 @@ def list_customers(limit: int = 10):
         "source": "fireberry",
         "sample": records,
     }
-
+ 
 @app.get("/columns")
 def get_columns():
     return {
@@ -464,14 +461,60 @@ def get_columns():
         "priority_codes":  {"1": "רגילה", "2": "גבוהה", "3": "נמוכה"},
         "case_types":      {"1": "בעיה", "2": "שאלה", "3": "בקשה", "4": "תקלה"},
     }
-
+ 
 @app.get("/reset-cache")
 def reset_cache():
-    """מאפס את ה-deduplication cache — לשימוש בטסטינג בלבד"""
     _escalation_cache.clear()
     return {"success": True, "message": "Cache cleared"}
-
+ 
 @app.get("/debug-case/{case_id}")
 def debug_case(case_id: str):
     data = fb_get(f"record/Cases/{case_id}")
     return data
+ 
+# ─── DEBUG: Field discovery endpoints ────────────────────────
+# ⚠️ השאר אותם זמנית עד שתוודא שה-Note עובד, אחר כך מחק
+ 
+@app.get("/debug-fields/{record_type}")
+def debug_fields(record_type: str):
+    """
+    מושך רשומה אחת ומחזיר את כל שמות השדות שלה.
+    דוגמאות: /debug-fields/note | /debug-fields/Cases
+    """
+    data    = fb_get(f"record/{record_type}", {"page_size": "1"})
+    records = data.get("data", {}).get("Records", [])
+    if not records:
+        return {"fields": [], "note": "No records found"}
+    return {
+        "record_type": record_type,
+        "fields":      list(records[0].keys()),
+        "sample":      records[0],
+    }
+ 
+@app.get("/debug-note-create")
+def debug_note_create(ticket_id: str):
+    """
+    מנסה ליצור Note עם כל וריאנטים של שמות השדה.
+    דוגמה: /debug-note-create?ticket_id=799c3c95-7983-4fc1-87a6-0f6be2f61b45
+    מה שיחזיר success=true — זה השדה הנכון.
+    """
+    results    = {}
+    candidates = [
+        {"casesid":           ticket_id, "regardingtype": "Cases", "notetext": "test", "subject": "test"},
+        {"regardingobjectid": ticket_id, "regardingtype": "Cases", "notetext": "test", "subject": "test"},
+        {"relatedtoid":       ticket_id, "regardingtype": "Cases", "notetext": "test", "subject": "test"},
+        {"parentid":          ticket_id, "regardingtype": "Cases", "notetext": "test", "subject": "test"},
+        {"regardingid":       ticket_id, "regardingtype": "Cases", "notetext": "test", "subject": "test"},
+    ]
+    for payload in candidates:
+        field_name = [k for k in payload if k not in ("regardingtype", "notetext", "subject")][0]
+        try:
+            url = f"{FIREBERRY_BASE}/record/note"
+            res = requests.post(url, headers=fb_headers(), json=payload, timeout=10)
+            results[field_name] = {
+                "status_code": res.status_code,
+                "response":    res.json(),
+            }
+        except Exception as e:
+            results[field_name] = {"error": str(e)}
+    return results
